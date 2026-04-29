@@ -164,8 +164,8 @@ All operations support:
 
 ## Contributions
 
-Feel free to [report bugs, request new features](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter/issues)
-or to [contribute](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter/pulls) to this project!
+Feel free to report bugs, request new features
+or to contribute to this project!
 
 ---
 
@@ -175,6 +175,10 @@ or to [contribute](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter/pull
 
 - To find unreferenced assets in Unity project see [Dependencies-Hunter](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter).
 
+##### Addressables Inspector
+
+- To analyze addressables layout [Addressables-Inspector](https://github.com/AlexeyPerov/Unity-Addressables-Inspector).
+
 ##### Missing References Hunter
 
 - To find missing or empty references in your assets see [Missing-References-Hunter](https://github.com/AlexeyPerov/Unity-MissingReferences-Hunter).
@@ -183,7 +187,12 @@ or to [contribute](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter/pull
 
 - To analyze your textures and atlases see [Textures-Hunter](https://github.com/AlexeyPerov/Unity-Textures-Hunter).
 
+##### Asset Inspector
+
+- To analyze asset dependencies [Asset-Inspector](https://github.com/AlexeyPerov/Unity-Asset-Inspector).
+
 ##### Editor Coroutines
 
 - Unity Editor Coroutines alternative version [Lite-Editor-Coroutines](https://github.com/AlexeyPerov/Unity-Lite-Editor-Coroutines).
 - Simplified and compact version [Pocket-Editor-Coroutines](https://github.com/AlexeyPerov/Unity-Pocket-Editor-Coroutines).
+
