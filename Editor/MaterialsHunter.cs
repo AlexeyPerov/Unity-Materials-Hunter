@@ -1,10 +1,9 @@
 // ReSharper disable CommentTypo
-// #define HUNT_ADDRESSABLES
-// #define HUNT_LAYOUT
 
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -16,13 +15,6 @@ using UnityEngine;
 // ReSharper disable StringLiteralTypo
 // ReSharper disable UnusedParameter.Local
 // ReSharper disable UnassignedGetOnlyAutoProperty
-
-#if HUNT_ADDRESSABLES
-using UnityEditor.AddressableAssets;
-#endif
-#if HUNT_LAYOUT
-using Oddworm.EditorFramework;
-#endif
 
 // ReSharper disable once CheckNamespace
 namespace MaterialsHunter
@@ -77,20 +69,19 @@ namespace MaterialsHunter
             
             public bool InstancingDisabledAreErrors { get; set; } = true;
             public bool SrpBatcherIncompatibleAreErrors { get; set; } = true;
+            public bool TryUseReflectionForAddressablesDetection { get; set; }
             
             public int GarbageCollectStep { get; set; } = DefaultGCStep;
             
             // limit number of assets in analysis to perform it faster for debug purposes
             public int DebugLimit;
             
-#if HUNT_LAYOUT            
-            public RichBuildLayout BuildLayout { get; set; }
+            public LiteBuildLayoutProvider BuildLayout { get; set; }
 
             public string GetBundleNameByAssetPath(string assetPath)
             {
                 return BuildLayout == null ? string.Empty : BuildLayout.GetBundleNameByAssetPath(assetPath);
             }
-#endif
         }
 
         private class IgnoredPatternsAsset : ScriptableObject
@@ -384,9 +375,7 @@ namespace MaterialsHunter
             {
                 Path = path;
                 ChildName = childName;
-#if HUNT_LAYOUT
                 Bundle = analysisSettings.GetBundleNameByAssetPath(path);
-#endif
             }
         }
 
@@ -409,6 +398,10 @@ namespace MaterialsHunter
 
         private class MaterialAssetData : ItemDataBase
         {
+            private readonly bool _tryUseReflectionForAddressablesDetection;
+            private bool _isAddressableCalculated;
+            private bool _isAddressable;
+
             public MaterialAssetData(
                 string path, 
                 Type type,
@@ -424,11 +417,10 @@ namespace MaterialsHunter
                 ReadableSize = readableSize;
 
                 InResources = Path.Contains("/Resources/");
+                _tryUseReflectionForAddressablesDetection =
+                    analysisSettings.TryUseReflectionForAddressablesDetection;
 
-                IsAddressable = CommonUtilities.IsAssetAddressable(Path);
-#if HUNT_LAYOUT
                 Bundle = analysisSettings.GetBundleNameByAssetPath(path);
-#endif
             }
 
             public string Path { get; }
@@ -445,7 +437,20 @@ namespace MaterialsHunter
             public string Bundle { get; }
             
             public bool InResources { get; }
-            public bool IsAddressable { get; }
+            public bool IsAddressable
+            {
+                get
+                {
+                    if (_isAddressableCalculated)
+                        return _isAddressable;
+
+                    _isAddressableCalculated = true;
+                    _isAddressable = CommonUtilities.IsAssetAddressable(
+                        Path,
+                        _tryUseReflectionForAddressablesDetection);
+                    return _isAddressable;
+                }
+            }
 
             public string Fingerprint { get; set; }
             public List<string> DuplicatePaths { get; private set; }
@@ -515,7 +520,7 @@ namespace MaterialsHunter
         [MenuItem("Tools/Materials Hunter")]
         public static void LaunchWindow()
         {
-            GetWindow<MaterialsHunterWindow>();
+            GetWindow<MaterialsHunterWindow>("Materials Hunter");
         }
         
         private static void Clear()
@@ -565,6 +570,7 @@ namespace MaterialsHunter
         {
             _analysisOngoing = true;
             EnsureCacheCompatibility();
+            CommonUtilities.ClearAddressablesCache();
             
             _result ??= new Result();
             
@@ -707,6 +713,7 @@ namespace MaterialsHunter
                 _analysisSettings.VariantHeavyOverridesThreshold,
                 _analysisSettings.InstancingDisabledAreErrors,
                 _analysisSettings.SrpBatcherIncompatibleAreErrors,
+                _analysisSettings.TryUseReflectionForAddressablesDetection,
                 _analysisSettings.DebugLimit);
         }
 
@@ -929,6 +936,7 @@ namespace MaterialsHunter
         {
             _analysisOngoing = true;
             EnsureCacheCompatibility();
+            CommonUtilities.ClearAddressablesCache();
             
             _result ??= new Result();
             
@@ -1806,14 +1814,18 @@ namespace MaterialsHunter
 
             if (!_analysisOngoing)
             {
-                var postfix = _result != null && _result.Materials != null ? " (Overrides last results)" : string.Empty;
-                if (GUILayout.Button($"Scan Materials {postfix}", GUILayout.Width(300f)))
+                if (GUILayout.Button(
+                        new GUIContent($"Scan Materials",
+                            "Scans Material assets: shader use, duplicates, unused materials, default textures, variant chains, and GPU batching flags. Replaces the previous materials result when finished."),
+                        GUILayout.Width(300f)))
                 {
                     PocketEditorCoroutine.Start(PopulateMaterialAssetsList(), this);
                 }
                 
-                postfix = _result != null && _result.Renderers != null ? " (Overrides last results)" : string.Empty;
-                if (GUILayout.Button($"Scan Renderers {postfix}", GUILayout.Width(300f)))
+                if (GUILayout.Button(
+                        new GUIContent($"Scan Renderers",
+                            "Scenes and prefabs: finds Renderer components and inspects material slots for missing, default, or built-in references. Replaces the previous renderers result when finished."),
+                        GUILayout.Width(300f)))
                 {
                     PocketEditorCoroutine.Start(PopulateRenderersList(), this);
                 }
@@ -1846,7 +1858,9 @@ namespace MaterialsHunter
 
             GUIUtilities.HorizontalLine();
 
-            _batchOperationsFoldout = EditorGUILayout.Foldout(_batchOperationsFoldout, "Batch Operations");
+            _batchOperationsFoldout = EditorGUILayout.Foldout(_batchOperationsFoldout,
+                new GUIContent("Batch Operations",
+                    "Destructive fixes on renderers and materials. Use \"Just log (dry run)\" first to preview actions in the Console without saving scenes or assets."));
 
             if (_batchOperationsFoldout)
             {
@@ -1857,11 +1871,16 @@ namespace MaterialsHunter
                 }
                 else
                 {
-                    _batchOperationsJustLog = EditorGUILayout.Toggle("Just log (dry run)", _batchOperationsJustLog);
+                    _batchOperationsJustLog = EditorGUILayout.Toggle(
+                        new GUIContent("Just log (dry run)",
+                            "When enabled, batch routines only log what they would change; no prefabs, scenes, or materials are saved."),
+                        _batchOperationsJustLog);
                     GUIUtilities.HorizontalLine();
                     EditorGUILayout.LabelField("Apply Batch operations to currently filtered renderers or to all:");
                     _batchTargetOnlyFilteredRenderers = EditorGUILayout.Toggle(
-                        "Apply to filtered", _batchTargetOnlyFilteredRenderers);
+                        new GUIContent("Apply to filtered",
+                            "When enabled, batch actions only touch renderers that pass the current path and warning filters in the Renderers tab."),
+                        _batchTargetOnlyFilteredRenderers);
                     var batchTargetsCount = GetBatchRendererTargets().Count();
                     EditorGUILayout.LabelField(
                         $"Batch targets: {batchTargetsCount} renderer entries from " +
@@ -1870,7 +1889,10 @@ namespace MaterialsHunter
                     GUIUtilities.HorizontalLine();
                     EditorGUILayout.LabelField("Renderer-only operation", EditorStyles.boldLabel);
                     EditorGUILayout.LabelField("Remove null material slots");
-                    if (GUILayout.Button("Apply: Remove null slots", GUILayout.Width(250f)))
+                    if (GUILayout.Button(
+                            new GUIContent("Apply: Remove null slots",
+                                "Removes null entries from shared material arrays on target renderers so slot lists are contiguous."),
+                            GUILayout.Width(250f)))
                     {
                         PocketEditorCoroutine.Start(RunBatchRemoveNullMaterialSlots(), this);
                     }
@@ -1887,10 +1909,15 @@ namespace MaterialsHunter
                         GUIUtilities.HorizontalLine();
                         EditorGUILayout.LabelField("Replace a specific material", EditorStyles.boldLabel);
                         _batchReplaceSourceMaterial = (Material)EditorGUILayout.ObjectField(
-                            "Source material", _batchReplaceSourceMaterial, typeof(Material), false);
+                            new GUIContent("Source material", "References to this material on target renderers are candidates for replacement."),
+                            _batchReplaceSourceMaterial, typeof(Material), false);
                         _batchReplaceTargetMaterial = (Material)EditorGUILayout.ObjectField(
-                            "Target material", _batchReplaceTargetMaterial, typeof(Material), false);
-                        if (GUILayout.Button("Apply: Replace source -> target", GUILayout.Width(300f)))
+                            new GUIContent("Target material", "Replacement material written into matching slots when you apply."),
+                            _batchReplaceTargetMaterial, typeof(Material), false);
+                        if (GUILayout.Button(
+                                new GUIContent("Apply: Replace source -> target",
+                                    "Replaces the source material with the target on all applicable renderer slots in the batch set."),
+                                GUILayout.Width(300f)))
                         {
                             PocketEditorCoroutine.Start(RunBatchReplaceMaterial(_batchReplaceSourceMaterial, _batchReplaceTargetMaterial), this);
                         }
@@ -1898,8 +1925,12 @@ namespace MaterialsHunter
                         GUIUtilities.HorizontalLine();
                         EditorGUILayout.LabelField("Replace unity_builtin/default material references", EditorStyles.boldLabel);
                         _batchBuiltinFallbackMaterial = (Material)EditorGUILayout.ObjectField(
-                            "Fallback material", _batchBuiltinFallbackMaterial, typeof(Material), false);
-                        if (GUILayout.Button("Apply: Replace unity_builtin with fallback", GUILayout.Width(320f)))
+                            new GUIContent("Fallback material", "Substitute for Unity built-in or default materials on target renderers."),
+                            _batchBuiltinFallbackMaterial, typeof(Material), false);
+                        if (GUILayout.Button(
+                                new GUIContent("Apply: Replace unity_builtin with fallback",
+                                    "Rewrites renderer slots that still reference hidden built-in or default materials to use the fallback material."),
+                                GUILayout.Width(320f)))
                         {
                             PocketEditorCoroutine.Start(RunBatchReplaceBuiltinMaterials(_batchBuiltinFallbackMaterial), this);
                         }
@@ -1907,8 +1938,12 @@ namespace MaterialsHunter
                         GUIUtilities.HorizontalLine();
                         EditorGUILayout.LabelField("Fix missing shaders", EditorStyles.boldLabel);
                         _batchMissingShaderFallback = (Shader)EditorGUILayout.ObjectField(
-                            "Fallback shader", _batchMissingShaderFallback, typeof(Shader), false);
-                        if (GUILayout.Button("Apply: Fix missing shaders to fallback", GUILayout.Width(320f)))
+                            new GUIContent("Fallback shader", "Shader assigned to materials whose shader is missing or broken."),
+                            _batchMissingShaderFallback, typeof(Shader), false);
+                        if (GUILayout.Button(
+                                new GUIContent("Apply: Fix missing shaders to fallback",
+                                    "Sets affected materials to use the fallback shader when the current shader cannot be resolved."),
+                                GUILayout.Width(320f)))
                         {
                             PocketEditorCoroutine.Start(RunBatchFixMissingShaders(_batchMissingShaderFallback), this);
                         }
@@ -1921,7 +1956,8 @@ namespace MaterialsHunter
             if (_result.ShaderUsageCounts != null && _result.ShaderUsageCounts.Count > 0)
             {
                 _shaderUsageFoldout = EditorGUILayout.Foldout(_shaderUsageFoldout,
-                    $"Shader Usage Summary [{_result.ShaderUsageCounts.Count} shaders]");
+                    new GUIContent($"Shader Usage Summary [{_result.ShaderUsageCounts.Count} shaders]",
+                        "Read-only counts of how many materials use each shader name from the last materials scan."));
 
                 if (_shaderUsageFoldout)
                 {
@@ -1955,14 +1991,20 @@ namespace MaterialsHunter
             
             GUI.color = _outputSettings.TypeFilter == OutputFilterType.MaterialAssets ? Color.yellow : Color.white;
             
-            if (GUILayout.Button($"[{_result.FilteredMaterials.Count}] Materials", GUILayout.Width(200f)))
+            if (GUILayout.Button(
+                    new GUIContent($"[{_result.FilteredMaterials.Count}] Materials",
+                        "Material assets: duplicates, unused, shader and variant details, and texture slot issues after the last materials scan."),
+                    GUILayout.Width(200f)))
             {
                 _outputSettings.TypeFilter = OutputFilterType.MaterialAssets;
             }
             
             GUI.color = _outputSettings.TypeFilter == OutputFilterType.RendererComponents ? Color.yellow : Color.white;
             
-            if (GUILayout.Button($"[{_result.FilteredRenderers.Count}] Renderers", GUILayout.Width(200f)))
+            if (GUILayout.Button(
+                    new GUIContent($"[{_result.FilteredRenderers.Count}] Renderers",
+                        "Renderer components from the last renderers scan: per-instance material slots and warnings."),
+                    GUILayout.Width(200f)))
             {
                 _outputSettings.TypeFilter = OutputFilterType.RendererComponents;
             }
@@ -1980,7 +2022,9 @@ namespace MaterialsHunter
             var prevTextFieldAlignment = textFieldStyle.alignment;
             textFieldStyle.alignment = TextAnchor.MiddleCenter;
             
-            _outputSettings.PathFilter = EditorGUILayout.TextField("Path Contains:", 
+            _outputSettings.PathFilter = EditorGUILayout.TextField(
+                new GUIContent("Path Contains:",
+                    "Shows only rows whose path contains this substring (after ignore patterns). Not a regular expression."),
                 _outputSettings.PathFilter, GUILayout.Width(400f));
 
             textFieldStyle.alignment = prevTextFieldAlignment;
@@ -1988,7 +2032,10 @@ namespace MaterialsHunter
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Export Materials CSV", GUILayout.Width(180f)))
+            if (GUILayout.Button(
+                    new GUIContent("Export Materials CSV",
+                        "Writes the currently filtered material list to a CSV file you choose in a save dialog."),
+                    GUILayout.Width(180f)))
             {
                 var outputPath = EditorUtility.SaveFilePanel(
                     "Export Materials CSV",
@@ -2001,7 +2048,10 @@ namespace MaterialsHunter
                 }
             }
 
-            if (GUILayout.Button("Export Renderers CSV", GUILayout.Width(180f)))
+            if (GUILayout.Button(
+                    new GUIContent("Export Renderers CSV",
+                        "Writes the currently filtered renderer list to a CSV file you choose in a save dialog."),
+                    GUILayout.Width(180f)))
             {
                 var outputPath = EditorUtility.SaveFilePanel(
                     "Export Renderers CSV",
@@ -2045,34 +2095,44 @@ namespace MaterialsHunter
             
             GUI.color = sortType == 0 || sortType == 1 ? Color.yellow : Color.white;
             var orderType = sortType == 1 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by warnings " + orderType, GUILayout.Width(150f)))
+            if (GUILayout.Button(new GUIContent("Sort by warnings " + orderType,
+                    "Sorts renderers by highest warning level. Click again to reverse ascending and descending order."),
+                    GUILayout.Width(150f)))
             {
                 SortRenderersByWarnings(renderers, settings);
             }
         
             GUI.color = sortType == 2 || sortType == 3 ? Color.yellow : Color.white;
             orderType = sortType == 3 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by path " + orderType, GUILayout.Width(150f)))
+            if (GUILayout.Button(new GUIContent("Sort by path " + orderType,
+                    "Sorts by scene or prefab path of the renderer’s GameObject. Click again to reverse sort."),
+                    GUILayout.Width(150f)))
             {
                 SortRenderersByPath(renderers, settings);
             }
             
             GUI.color = sortType == 4 || sortType == 5 ? Color.yellow : Color.white;
             orderType = sortType == 5 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by material slots " + orderType, GUILayout.Width(180f)))
+            if (GUILayout.Button(new GUIContent("Sort by material slots " + orderType,
+                    "Sorts by the number of material slots on the renderer. Click again to reverse sort."),
+                    GUILayout.Width(180f)))
             {
                 SortRenderersByMaterialCount(renderers, settings);
             }
 
             GUI.color = sortType == 6 || sortType == 7 ? Color.yellow : Color.white;
             orderType = sortType == 7 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by warning count " + orderType, GUILayout.Width(180f)))
+            if (GUILayout.Button(new GUIContent("Sort by warning count " + orderType,
+                    "Sorts by how many distinct warning strings the row has. Click again to reverse sort."),
+                    GUILayout.Width(180f)))
             {
                 SortRenderersByWarningCount(renderers, settings);
             }
             
             GUI.color = settings.WarningsOnly ? Color.yellow : Color.white;
-            if (GUILayout.Button("Warnings Level 2+ Only", GUILayout.Width(250f)))
+            if (GUILayout.Button(new GUIContent("Warnings Level 2+ Only",
+                    "When highlighted, hides rows at warning level 1 so only medium and severe issues remain visible."),
+                    GUILayout.Width(250f)))
             {
                 settings.WarningsOnly = !settings.WarningsOnly;
             }
@@ -2152,12 +2212,10 @@ namespace MaterialsHunter
 
                     GUI.skin.button.alignment = alignment;
 
-#if HUNT_LAYOUT                
                     if (_analysisSettings.BuildLayout != null)
                     {
                         EditorGUILayout.LabelField($"[{asset.Bundle}]", GUILayout.Width(250));
                     }
-#endif
                     GUI.color = prevColor;
                     
                     GUIUtilities.HorizontalLine();
@@ -2677,27 +2735,35 @@ namespace MaterialsHunter
             
             GUI.color = sortType == 0 || sortType == 1 ? Color.yellow : Color.white;
             var orderType = sortType == 1 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by warnings " + orderType, GUILayout.Width(150f)))
+            if (GUILayout.Button(new GUIContent("Sort by warnings " + orderType,
+                    "Sorts materials by warning level. Click again to flip ascending and descending order."),
+                    GUILayout.Width(150f)))
             {
                 SortMaterialsByWarnings(materials, settings);
             }
         
             GUI.color = sortType == 2 || sortType == 3 ? Color.yellow : Color.white;
             orderType = sortType == 3 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by path " + orderType, GUILayout.Width(150f)))
+            if (GUILayout.Button(new GUIContent("Sort by path " + orderType,
+                    "Sorts by material asset path. Click again to reverse sort."),
+                    GUILayout.Width(150f)))
             {
                 SortMaterialsByPath(materials, settings);
             }
             
             GUI.color = sortType == 4 || sortType == 5 ? Color.yellow : Color.white;
             orderType = sortType == 5 ? "Z-A" : "A-Z";
-            if (GUILayout.Button("Sort by size " + orderType, GUILayout.Width(150f)))
+            if (GUILayout.Button(new GUIContent("Sort by size " + orderType,
+                    "Sorts by material file size on disk. Click again to reverse sort."),
+                    GUILayout.Width(150f)))
             {
                 SortMaterialsBySize(materials, settings);
             }
             
             GUI.color = settings.WarningsOnly ? Color.yellow : Color.white;
-            if (GUILayout.Button("Warnings Level 2+ Only", GUILayout.Width(250f)))
+            if (GUILayout.Button(new GUIContent("Warnings Level 2+ Only",
+                    "When highlighted, hides rows at warning level 1 so only medium and severe issues remain visible."),
+                    GUILayout.Width(250f)))
             {
                 settings.WarningsOnly = !settings.WarningsOnly;
             }
@@ -2777,13 +2843,11 @@ namespace MaterialsHunter
             EditorGUILayout.LabelField(asset.ReadableSize, GUILayout.Width(70f));
 
             GUI.color = prevColor;
-            
-#if HUNT_LAYOUT
+
             if (_analysisSettings.BuildLayout != null)
             {
                 EditorGUILayout.LabelField($"[{asset.Bundle}]", GUILayout.Width(250));
             }
-#endif
 
             GUI.color = prevColor;
 
@@ -3081,18 +3145,26 @@ namespace MaterialsHunter
 
             EditorGUILayout.BeginHorizontal();
             
-            var prevColor = GUI.color;
-            GUI.color = !settings.PageToShow.HasValue ? Color.yellow : Color.white;
-
-            if (GUILayout.Button("All", GUILayout.Width(30f)))
-            {
-                settings.PageToShow = null;
-            }
-
-            GUI.color = prevColor;
-            
             var totalCount = assetsCount;
             var pagesCount = totalCount / OutputSettings.PageSize + (totalCount % OutputSettings.PageSize > 0 ? 1 : 0);
+            var showAllButton = totalCount <= 150;
+            if (!showAllButton && !settings.PageToShow.HasValue && pagesCount > 0)
+            {
+                settings.PageToShow = 0;
+            }
+
+            var prevColor = GUI.color;
+            if (showAllButton)
+            {
+                GUI.color = !settings.PageToShow.HasValue ? Color.yellow : Color.white;
+
+                if (GUILayout.Button("All", GUILayout.Width(30f)))
+                {
+                    settings.PageToShow = null;
+                }
+
+                GUI.color = prevColor;
+            }
 
             for (var i = 0; i < pagesCount; i++)
             {
@@ -3126,14 +3198,14 @@ namespace MaterialsHunter
             EnsureAnalysisSettingsLoaded();
             
             _analysisSettingsFoldout = EditorGUILayout.Foldout(_analysisSettingsFoldout,
-                "Analysis Settings.");
+                new GUIContent("Analysis Settings.",
+                    "Toggles control which conditions raise material and renderer warning levels. Changes apply on the next scan."));
 
             if (!_analysisSettingsFoldout) 
                 return;
 
             GUIUtilities.HorizontalLine();
-            
-#if HUNT_LAYOUT
+
             if (_analysisSettings.BuildLayout != null)
             {
                 GUIUtilities.DrawColoredLabel("BuildLayout has been loaded", Color.green);
@@ -3141,43 +3213,85 @@ namespace MaterialsHunter
 
             GUIUtilities.DrawAtCenterHorizontally(() =>
             {
-                if (GUILayout.Button("Load BuildLayout.txt"))
+                if (GUILayout.Button(new GUIContent("Load BuildLayout.txt",
+                        "Load Unity BuildLayout.txt so list rows can show an asset bundle name when available from that build output.")))
                 {
                     var path = EditorUtility.OpenFilePanelWithFilters("Open BuildLayout.txt", "Library", new[] { "Text Files (*.txt)", "txt" });
                     if (string.IsNullOrEmpty(path))
                         return;
-                    _analysisSettings.BuildLayout = new RichBuildLayout(BuildLayout.Load(path));
+                    _analysisSettings.BuildLayout = LiteBuildLayoutProvider.Load(path);
                 }
             }, Color.white);
-#endif
 
             GUIUtilities.HorizontalLine();
 
             EditorGUILayout.BeginHorizontal();
 
             EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-            _analysisSettings.DefaultMaterialsAreErrors = EditorGUILayout.ToggleLeft("Default Materials are errors", _analysisSettings.DefaultMaterialsAreErrors);
-            _analysisSettings.NullMaterialsAreErrors = EditorGUILayout.ToggleLeft("Null Materials are errors", _analysisSettings.NullMaterialsAreErrors);
-            _analysisSettings.DefaultTexturesAreErrors = EditorGUILayout.ToggleLeft("Default Textures are errors", _analysisSettings.DefaultTexturesAreErrors);
-            _analysisSettings.NullTexturesAreErrors = EditorGUILayout.ToggleLeft("Null Textures are errors", _analysisSettings.NullTexturesAreErrors);
-            _analysisSettings.DuplicateMaterialsAreErrors = EditorGUILayout.ToggleLeft("Duplicate Materials are errors", _analysisSettings.DuplicateMaterialsAreErrors);
-            _analysisSettings.UnusedMaterialsAreErrors = EditorGUILayout.ToggleLeft("Unused Materials are errors", _analysisSettings.UnusedMaterialsAreErrors);
-            _analysisSettings.BuiltinShadersAreErrors = EditorGUILayout.ToggleLeft("Builtin Shaders are errors", _analysisSettings.BuiltinShadersAreErrors);
+            _analysisSettings.DefaultMaterialsAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Default Materials are errors",
+                    "Flags renderers or slots still using Unity’s default material as higher severity."),
+                _analysisSettings.DefaultMaterialsAreErrors);
+            _analysisSettings.NullMaterialsAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Null Materials are errors",
+                    "Flags empty material slots on renderers as higher severity."),
+                _analysisSettings.NullMaterialsAreErrors);
+            _analysisSettings.DefaultTexturesAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Default Textures are errors",
+                    "Flags materials referencing default or missing texture bindings where detected."),
+                _analysisSettings.DefaultTexturesAreErrors);
+            _analysisSettings.NullTexturesAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Null Textures are errors",
+                    "Flags unset texture properties that should be assigned."),
+                _analysisSettings.NullTexturesAreErrors);
+            _analysisSettings.DuplicateMaterialsAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Duplicate Materials are errors",
+                    "Treats materials that are byte-identical duplicates as higher severity."),
+                _analysisSettings.DuplicateMaterialsAreErrors);
+            _analysisSettings.UnusedMaterialsAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Unused Materials are errors",
+                    "Raises severity for materials with no renderer references in the scanned set (subject to Addressables detection)."),
+                _analysisSettings.UnusedMaterialsAreErrors);
+            _analysisSettings.BuiltinShadersAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Builtin Shaders are errors",
+                    "Flags use of built-in shaders when you want only project shaders in production content."),
+                _analysisSettings.BuiltinShadersAreErrors);
             EditorGUILayout.EndVertical();
 
             EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-            _analysisSettings.VariantChainsAreErrors = EditorGUILayout.ToggleLeft("Variant deep chains are errors", _analysisSettings.VariantChainsAreErrors);
-            _analysisSettings.VariantHeavyOverridesAreErrors = EditorGUILayout.ToggleLeft("Heavy variant overrides are errors", _analysisSettings.VariantHeavyOverridesAreErrors);
-            _analysisSettings.InstancingDisabledAreErrors = EditorGUILayout.ToggleLeft("Instancing disabled is error", _analysisSettings.InstancingDisabledAreErrors);
-            _analysisSettings.SrpBatcherIncompatibleAreErrors = EditorGUILayout.ToggleLeft("SRP Batcher incompatible is error", _analysisSettings.SrpBatcherIncompatibleAreErrors);
+            _analysisSettings.VariantChainsAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Variant deep chains are errors",
+                    "When on, material variant parent chains deeper than the threshold add warning severity."),
+                _analysisSettings.VariantChainsAreErrors);
+            _analysisSettings.VariantHeavyOverridesAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Heavy variant overrides are errors",
+                    "When on, many property overrides on a variant versus its parent add warning severity."),
+                _analysisSettings.VariantHeavyOverridesAreErrors);
+            _analysisSettings.InstancingDisabledAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("Instancing disabled is error",
+                    "When on, materials with GPU instancing turned off are flagged more strongly."),
+                _analysisSettings.InstancingDisabledAreErrors);
+            _analysisSettings.SrpBatcherIncompatibleAreErrors = EditorGUILayout.ToggleLeft(
+                new GUIContent("SRP Batcher incompatible is error",
+                    "When on, materials that break SRP Batcher batching rules are flagged more strongly."),
+                _analysisSettings.SrpBatcherIncompatibleAreErrors);
+            _analysisSettings.TryUseReflectionForAddressablesDetection =
+                EditorGUILayout.ToggleLeft(
+                    new GUIContent("Try Detect Addressables",
+                        "Uses reflection on Addressables settings so \"unused\" materials that are addressable are not misclassified."),
+                    _analysisSettings.TryUseReflectionForAddressablesDetection);
 
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Deep chain threshold", GUILayout.Width(150f));
+            EditorGUILayout.LabelField(new GUIContent("Deep chain threshold",
+                "Variant chain depth above this count contributes to warnings when deep chains are treated as errors."),
+                GUILayout.Width(150f));
             _analysisSettings.VariantDeepChainThreshold = EditorGUILayout.IntField(_analysisSettings.VariantDeepChainThreshold, GUILayout.Width(70f));
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Heavy override threshold", GUILayout.Width(150f));
+            EditorGUILayout.LabelField(new GUIContent("Heavy override threshold",
+                "Number of property overrides versus parent above this count contributes when heavy overrides are errors."),
+                GUILayout.Width(150f));
             _analysisSettings.VariantHeavyOverridesThreshold = EditorGUILayout.IntField(_analysisSettings.VariantHeavyOverridesThreshold, GUILayout.Width(70f));
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
@@ -3188,11 +3302,17 @@ namespace MaterialsHunter
             
             GUILayout.Label(
                 "*If you face OOM during analysis then try to lower GC parameter below");
-            _analysisSettings.GarbageCollectStep = EditorGUILayout.IntField("GC once in (iterations):", _analysisSettings.GarbageCollectStep);
+            _analysisSettings.GarbageCollectStep = EditorGUILayout.IntField(
+                new GUIContent("GC once in (iterations):",
+                    "Run GC every N steps while scanning to limit memory spikes. Zero disables throttling (higher RAM use)."),
+                _analysisSettings.GarbageCollectStep);
             
             GUILayout.Label(
                 "*Below is a debug option to limit number of assets in the analysis");
-            _analysisSettings.DebugLimit = EditorGUILayout.IntField("Assets Debug Limit:", _analysisSettings.DebugLimit);
+            _analysisSettings.DebugLimit = EditorGUILayout.IntField(
+                new GUIContent("Assets Debug Limit:",
+                    "Stops scanning after a limited count for quick tests. Zero means no limit."),
+                _analysisSettings.DebugLimit);
         }
         
         private void OnSearchPatternsSettingsGUI()
@@ -3200,7 +3320,9 @@ namespace MaterialsHunter
             EnsureSearchPatternsLoaded();
                 
             _searchPatternsSettingsFoldout = EditorGUILayout.Foldout(_searchPatternsSettingsFoldout,
-                $"Search Patterns Settings. Total Patterns Used: {_searchPatternsSettings.IgnoredPatterns.Count}.");
+                new GUIContent(
+                    $"Search Patterns Settings. Total Patterns Used: {_searchPatternsSettings.IgnoredPatterns.Count}.",
+                    "Regular expressions: asset paths that match are omitted from result lists (not deleted). Next scan picks up edits to the pattern asset."));
 
             if (!_searchPatternsSettingsFoldout) 
                 return;
@@ -3222,21 +3344,24 @@ namespace MaterialsHunter
                 
                 EditorGUILayout.LabelField("However you may override it by setting you own RegExp list in a file", GUILayout.Width(450f));
 
-                if (GUILayout.Button("Create Settings File for Custom RegExp Patterns"))
+                if (GUILayout.Button(new GUIContent("Create Settings File for Custom RegExp Patterns",
+                        "Creates MaterialsHunterIgnorePatterns.asset under Assets/Editor for a custom ignore-regex list.")))
                 {
                     _searchPatternsSettings.CreateIgnoredPatternsAsset();
                 }
             }
             else
             {
-                if (GUILayout.Button("Open Settings File"))
+                if (GUILayout.Button(new GUIContent("Open Settings File",
+                        "Selects the ignore-patterns asset in the Project window for editing.")))
                 {
                     var settings = _searchPatternsSettings.IgnoredPatternsAsset;
                     Selection.activeObject = settings;
                     EditorGUIUtility.PingObject(settings);
                 }
                 
-                if (GUILayout.Button("Delete Settings File and Reset to Defaults"))
+                if (GUILayout.Button(new GUIContent("Delete Settings File and Reset to Defaults",
+                        "Deletes the custom asset and restores built-in default ignore patterns on the next scan.")))
                 {
                     _searchPatternsSettings.DeleteIgnoredPatternsAsset();
                 }
@@ -3505,17 +3630,145 @@ namespace MaterialsHunter
             return $"{len:0.##} {sizes[order]}";
         }
         
-        public static bool IsAssetAddressable(string assetPath)
+        private static readonly Dictionary<string, bool> AddressablesByGuidCache = new Dictionary<string, bool>();
+        private static bool _addressablesReflectionInitialized;
+        private static bool _addressablesReflectionAvailable;
+        private static bool _addressablesReflectionWarningLogged;
+        private static PropertyInfo _addressablesSettingsProperty;
+        private static MethodInfo _findAssetEntryMethod;
+        private static int _findAssetEntryParametersCount;
+        private static readonly object[] FindAssetEntrySingleArgument = new object[1];
+        private static readonly object[] FindAssetEntryDoubleArguments = new object[2];
+
+        public static void ClearAddressablesCache()
         {
-#if HUNT_ADDRESSABLES
-            var settings = AddressableAssetSettingsDefaultObject.Settings;
-            if (settings == null)
+            AddressablesByGuidCache.Clear();
+        }
+
+        public static bool IsAssetAddressable(string assetPath, bool tryUseReflection)
+        {
+            if (!tryUseReflection || string.IsNullOrEmpty(assetPath))
                 return false;
-            var entry = settings.FindAssetEntry(AssetDatabase.AssetPathToGUID(assetPath));
-            return entry != null;
-#else
-            return false;
-#endif
+
+            try
+            {
+                var guid = AssetDatabase.AssetPathToGUID(assetPath);
+                if (string.IsNullOrEmpty(guid))
+                    return false;
+
+                if (AddressablesByGuidCache.TryGetValue(guid, out var cachedResult))
+                    return cachedResult;
+
+                var result = IsGuidAddressable(guid);
+                AddressablesByGuidCache[guid] = result;
+                return result;
+            }
+            catch (Exception e)
+            {
+                LogAddressablesReflectionWarning($"checking asset {assetPath}", e);
+                return false;
+            }
+        }
+
+        private static bool IsGuidAddressable(string guid)
+        {
+            EnsureAddressablesReflectionInitialized();
+            if (!_addressablesReflectionAvailable)
+                return false;
+
+            try
+            {
+                var settings = _addressablesSettingsProperty.GetValue(null, null);
+                if (settings == null)
+                    return false;
+
+                object entry;
+                if (_findAssetEntryParametersCount == 1)
+                {
+                    FindAssetEntrySingleArgument[0] = guid;
+                    entry = _findAssetEntryMethod.Invoke(settings, FindAssetEntrySingleArgument);
+                    FindAssetEntrySingleArgument[0] = null;
+                }
+                else
+                {
+                    FindAssetEntryDoubleArguments[0] = guid;
+                    FindAssetEntryDoubleArguments[1] = true;
+                    entry = _findAssetEntryMethod.Invoke(settings, FindAssetEntryDoubleArguments);
+                    FindAssetEntryDoubleArguments[0] = null;
+                    FindAssetEntryDoubleArguments[1] = null;
+                }
+
+                return entry != null;
+            }
+            catch (Exception e)
+            {
+                _addressablesReflectionAvailable = false;
+                LogAddressablesReflectionWarning($"checking guid {guid}", e);
+                return false;
+            }
+        }
+
+        private static void EnsureAddressablesReflectionInitialized()
+        {
+            if (_addressablesReflectionInitialized)
+                return;
+
+            _addressablesReflectionInitialized = true;
+
+            try
+            {
+                Type defaultObjectType = null;
+                Type settingsType = null;
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+
+                foreach (var assembly in assemblies)
+                {
+                    defaultObjectType ??= assembly.GetType(
+                        "UnityEditor.AddressableAssets.Settings.AddressableAssetSettingsDefaultObject",
+                        false);
+                    defaultObjectType ??= assembly.GetType(
+                        "UnityEditor.AddressableAssets.AddressableAssetSettingsDefaultObject",
+                        false);
+
+                    settingsType ??= assembly.GetType(
+                        "UnityEditor.AddressableAssets.Settings.AddressableAssetSettings",
+                        false);
+                    settingsType ??= assembly.GetType(
+                        "UnityEditor.AddressableAssets.AddressableAssetSettings",
+                        false);
+
+                    if (defaultObjectType != null && settingsType != null)
+                        break;
+                }
+
+                if (defaultObjectType == null || settingsType == null)
+                    return;
+
+                _addressablesSettingsProperty = defaultObjectType.GetProperty(
+                    "Settings",
+                    BindingFlags.Public | BindingFlags.Static);
+                _findAssetEntryMethod =
+                    settingsType.GetMethod("FindAssetEntry", new[] { typeof(string) }) ??
+                    settingsType.GetMethod("FindAssetEntry", new[] { typeof(string), typeof(bool) });
+                _findAssetEntryParametersCount = _findAssetEntryMethod?.GetParameters().Length ?? 0;
+
+                _addressablesReflectionAvailable =
+                    _addressablesSettingsProperty != null && _findAssetEntryMethod != null;
+            }
+            catch (Exception e)
+            {
+                _addressablesReflectionAvailable = false;
+                LogAddressablesReflectionWarning("initializing Addressables reflection", e);
+            }
+        }
+
+        private static void LogAddressablesReflectionWarning(string context, Exception exception)
+        {
+            if (_addressablesReflectionWarningLogged)
+                return;
+
+            _addressablesReflectionWarningLogged = true;
+            Debug.LogWarning($"Failed to detect Addressables via reflection while {context}: {exception}");
         }
     }
     
@@ -3572,6 +3825,155 @@ namespace MaterialsHunter
 
             _lastTimeWaitStarted = null;
             return enumerator.MoveNext();
+        }
+    }
+
+    public class LiteBuildLayoutProvider
+    {
+        private readonly Dictionary<string, string> _assetPathToBundle = new(StringComparer.OrdinalIgnoreCase);
+
+        public string Name { get; }
+
+        private LiteBuildLayoutProvider(string name)
+        {
+            Name = name;
+        }
+
+        public static LiteBuildLayoutProvider Load(string path)
+        {
+            var name = Path.GetFileNameWithoutExtension(path);
+            var text = File.ReadAllText(path);
+            var provider = new LiteBuildLayoutProvider(name);
+
+            var lines = new List<string>();
+            foreach (var line in text.Split('\n'))
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                    lines.Add(line);
+            }
+
+            for (var n = 0; n < lines.Count; ++n)
+            {
+                var line = lines[n];
+
+                if (line.StartsWith("BuiltIn Bundles", StringComparison.Ordinal))
+                {
+                    ReadBundles(ref n, provider, lines);
+                    continue;
+                }
+
+                if (line.StartsWith("Group ", StringComparison.Ordinal))
+                {
+                    ReadBundles(ref n, provider, lines);
+                    continue;
+                }
+            }
+
+            return provider;
+        }
+
+        public string GetBundleNameByAssetPath(string assetPath)
+        {
+            return _assetPathToBundle.TryGetValue(assetPath, out var bundleName) ? bundleName : string.Empty;
+        }
+
+        private static void ReadBundles(ref int index, LiteBuildLayoutProvider provider, List<string> lines)
+        {
+            var containerIndent = GetIndent(lines[index]);
+            index++;
+
+            for (; index < lines.Count; ++index)
+            {
+                var l = lines[index];
+                var lineIndent = GetIndent(l);
+                if (lineIndent <= containerIndent)
+                {
+                    index--;
+                    return;
+                }
+
+                if (!l.StartsWith("\tArchive")) continue;
+
+                var bundleName = ExtractName(l);
+                var bundleIndent = lineIndent;
+
+                for (index++; index < lines.Count; ++index)
+                {
+                    if (GetIndent(lines[index]) <= bundleIndent)
+                        break;
+
+                    var trimmed = lines[index].TrimStart();
+                    if (trimmed.StartsWith("Explicit Assets", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ReadExplicitAssets(ref index, provider, bundleName, bundleIndent, lines);
+                    }
+                }
+
+                index--;
+            }
+        }
+
+        private static void ReadExplicitAssets(ref int index, LiteBuildLayoutProvider provider,
+            string bundleName, int bundleIndent, List<string> lines)
+        {
+            var assetsIndent = GetIndent(lines[index]);
+            index++;
+
+            for (; index < lines.Count; ++index)
+            {
+                var l = lines[index];
+                var lineIndent = GetIndent(l);
+                if (lineIndent <= assetsIndent)
+                {
+                    index--;
+                    return;
+                }
+
+                var assetName = ExtractName(l);
+                if (!string.IsNullOrEmpty(assetName))
+                {
+                    provider._assetPathToBundle[assetName] = bundleName;
+                }
+
+                var assetIndent = lineIndent;
+                for (index++; index < lines.Count; ++index)
+                {
+                    if (GetIndent(lines[index]) <= assetIndent)
+                        break;
+                }
+
+                index--;
+            }
+        }
+
+        private static string ExtractName(string line)
+        {
+            var lastParen = line.LastIndexOf(')');
+            var firstParen = lastParen;
+
+            var count = 1;
+            for (var n = lastParen - 1; n >= 0; --n)
+            {
+                if (line[n] == ')') count++;
+                if (line[n] == '(') count--;
+                if (count == 0) { firstParen = n; break; }
+            }
+
+            if (firstParen != lastParen && firstParen > 0)
+                line = line.Substring(0, firstParen);
+
+            return line.Trim();
+        }
+
+        private static int GetIndent(string s)
+        {
+            var count = 0;
+            for (var n = 0; n < s.Length; ++n)
+            {
+                if (s[n] == '\t') count++;
+                else break;
+            }
+            return count;
         }
     }
 }

@@ -15,6 +15,18 @@ So you can just copy-paste [MaterialsHunter.cs](./Editor/MaterialsHunter.cs) to 
 
 ![plot](./Screenshots~/mh-main.png)
 
+## Quick start
+
+Use "Tools/Materials Hunter" to open the window.
+
+Recommended workflow:
+
+- Run material collection to inspect material assets, shader links, texture slots, duplicates, variants, and batching-related warnings.
+- Run renderer collection to inspect scene and prefab renderer material slots.
+- Sort by warnings and use path filters to narrow the result set.
+- Use batch operations only after reviewing the filtered targets.
+- Enable `Just log (dry run)` before applying batch changes to preview the exact actions in the Console.
+
 ---
 
 ## Analyzed Issues Description
@@ -110,6 +122,12 @@ All operations support:
 
 - **Dry run:** via `Just log (dry run)` (no asset writes, only impact reporting).
 
+Safety notes:
+
+- Prefer running with `Just log (dry run)` first.
+- Batch operations can save changed prefabs, scenes, and material assets.
+- When `Apply to filtered` is enabled, current renderer filters define the target set.
+- Re-run collection after large changes to refresh warnings and references.
 
 ### 1) Replace material (`Apply: Replace source -> target`)
 
@@ -129,7 +147,7 @@ All operations support:
   - Fallback material must be assigned.
 - **Typical use:** Remove accidental fallback/internal materials from prefabs.
 
-### 3) Remove null material slots (`Apply: Remove null slots`)[README.md](../Unity-MissingReferences-Hunter/README.md)
+### 3) Remove null material slots (`Apply: Remove null slots`)
 
 - **What it does:** Compacts each targeted renderer’s material array by removing all `null` entries.
 - **Preconditions:**
@@ -144,6 +162,24 @@ All operations support:
   - Material scan results must exist.
   - Fallback shader must be assigned.
 - **Typical use:** Rapid recovery after shader package/pipeline migration or broken shader references.
+
+---
+
+## Output and export
+
+The results have separate Materials and Renderers views.
+Both views support path filtering, warning filters, sorting, and pagination for large projects.
+
+Use `Export Materials CSV` to write the currently filtered material rows.
+Use `Export Renderers CSV` to write the currently filtered renderer rows.
+Exports are useful for review outside Unity or for comparing results after cleanup.
+
+## Limitations and interpretation notes
+
+- `Duplicate of N material(s)` is a candidate warning, not always an error. Some duplicate-looking materials may be intentionally separated for ownership, variants, or future edits.
+- `Not referenced by any renderer, not in Resources, not Addressable` means the material was not found by this tool's scanned renderer/reference model. Runtime loading, custom registries, string paths, or external build systems can still use it.
+- Addressables and build-layout information require the matching defines/integrations described below.
+- Renderer-side warnings depend on the scenes and prefabs the tool can load and inspect in the editor.
 
 ---
 
