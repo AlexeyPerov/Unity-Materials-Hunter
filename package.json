@@ -1,10 +1,12 @@
 {
-  "name": "materialshunter",
+  "name": "materials-hunter",
   "version": "1.0.1",
-  "displayName": "MaterialsHunter",
-  "description": "Tool for Unity3D",
-  "unity": "2019.3",
+  "displayName": "Materials Hunter",
+  "description": "Materials and renderers analysis",
+  "unity": "2022.3",
   "keywords": [
+    "materials",
+    "renderers",
     "tool"
   ],
   "author": {
